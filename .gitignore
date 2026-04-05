@@ -1,0 +1,27 @@
+# ── Dependencies ──────────────────────────────────
+node_modules/
+
+# ── Build output ──────────────────────────────────
+academic-wallet/client/dist/
+
+# ── Runtime data (regenerated on startup) ─────────
+academic-wallet/data/db.json
+academic-wallet/data/uploads/
+
+# ── Excluded projects ────────────────────────────
+openbadges-specification/
+moodle-docker/
+
+# ── OS & editor files ────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ── Env files ────────────────────────────────────
+.env
+.env.local
+.env.production
