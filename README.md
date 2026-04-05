@@ -44,16 +44,41 @@ git clone <repository-url> openbadge
 cd openbadge
 ```
 
-Your directory structure should look like:
-```
-openbadge/
-├── academic-wallet/       # Wallet app (Node.js + React)
-├── moodle/                # Moodle source (mounted into Docker)
-├── docker-compose.yml     # Moodle + MariaDB Docker config
-└── README.md              # This file
+### Step 2: Download Moodle core
+
+The repo only contains the custom **Academic Wallet plugin** (`moodle/local/academic_wallet/`).
+You need to download Moodle core separately:
+
+```bash
+# Download Moodle 4.5 (or latest stable)
+git clone -b MOODLE_405_STABLE --depth 1 https://github.com/moodle/moodle.git moodle-temp
+
+# Move Moodle core files (without overwriting the plugin)
+cp -r moodle-temp/* moodle/
+rm -rf moodle-temp
 ```
 
-### Step 2: Start Moodle (Docker)
+> **Windows PowerShell alternative:**
+> ```powershell
+> git clone -b MOODLE_405_STABLE --depth 1 https://github.com/moodle/moodle.git moodle-temp
+> Copy-Item -Path moodle-temp\* -Destination moodle\ -Recurse -Force
+> Remove-Item -Recurse -Force moodle-temp
+> ```
+
+Your directory structure should now look like:
+```
+openbadge/
+├── academic-wallet/               # Wallet app (Node.js + React)
+├── moodle/                        # Moodle core (downloaded) + plugin
+│   ├── local/academic_wallet/     # ← Custom plugin (from this repo)
+│   ├── admin/
+│   ├── lib/
+│   └── ...                        # Standard Moodle files
+├── docker-compose.yml             # Moodle + MariaDB Docker config
+└── README.md                      # This file
+```
+
+### Step 3: Start Moodle (Docker)
 
 ```bash
 cd openbadge
@@ -91,7 +116,7 @@ Verify Moodle is running: open **http://localhost:8080** in your browser.
 |-------|----------|--------------|
 | Admin | admin    | Admin1234!   |
 
-### Step 3: Install and start the Wallet Backend
+### Step 4: Install and start the Wallet Backend
 
 ```bash
 cd openbadge/academic-wallet/server
@@ -101,7 +126,7 @@ npm start
 
 The server starts at **http://localhost:4000** and prints the demo accounts.
 
-### Step 4: Install and start the Wallet Frontend
+### Step 5: Install and start the Wallet Frontend
 
 Open a **new terminal**:
 
@@ -113,7 +138,7 @@ npm run dev
 
 The frontend starts at **http://localhost:5173**.
 
-### Step 5: Verify everything works
+### Step 6: Verify everything works
 
 Open these URLs in your browser:
 

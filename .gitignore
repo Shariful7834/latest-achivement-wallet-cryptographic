@@ -8,6 +8,12 @@ academic-wallet/client/dist/
 academic-wallet/data/db.json
 academic-wallet/data/uploads/
 
+# ── Moodle core (only plugin is tracked) ─────────
+moodle/*
+!moodle/local/
+moodle/local/*
+!moodle/local/academic_wallet/
+
 # ── Excluded projects ────────────────────────────
 openbadges-specification/
 moodle-docker/
