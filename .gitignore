@@ -8,6 +8,23 @@ academic-wallet/client/dist/
 academic-wallet/data/db.json
 academic-wallet/data/uploads/
 
+# ── Secrets: ES256 issuer signing keys + revocation state (NEVER commit) ──
+academic-wallet/data/keys/
+academic-wallet/data/status/
+
+# ── Local binaries / tunnels ─────────────────────
+cloudflared.exe
+*.exe
+
+# ── Thesis docs / scratch scripts (not part of the app) ──
+*.docx
+THESIS_*.md
+Thesis_*.md
+thesis_structure.txt
+certlister.txt
+screenshot/
+*.py
+
 # ── Moodle core (only plugin is tracked) ─────────
 moodle/*
 !moodle/local/
@@ -26,6 +43,7 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+.phpstorm.meta.php/
 
 # ── Env files ────────────────────────────────────
 .env
