@@ -90,6 +90,7 @@ router.get('/notifications', authMiddleware, requireRole('student'), (req, res) 
     history: all.filter(r => r.status !== 'pending').map(r => ({
       id: r.id,
       serviceName: r.serviceName,
+      serviceId: r.serviceId,
       credentialType: r.credentialType,
       status: r.status,
       createdAt: r.createdAt,
@@ -241,28 +242,31 @@ router.get('/access/requests', apiKeyMiddleware, (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════
-// Student revokes previously granted access
-// DELETE /wallet/access/:serviceId
+// Student revokes a single previously granted access request
+// DELETE /wallet/access/:requestId
 // ════════════════════════════════════════════════════════════
-router.delete('/access/:serviceId', authMiddleware, requireRole('student'), (req, res) => {
-  const requests = db.accessRequests.getByStudent(req.user.id)
-    .filter(r => r.serviceId === req.params.serviceId && r.status === 'approved');
+router.delete('/access/:requestId', authMiddleware, requireRole('student'), (req, res) => {
+  const request = db.accessRequests.findById(req.params.requestId);
 
-  if (requests.length === 0) {
-    return res.status(404).json({ error: 'No active access found for this service' });
+  if (!request) {
+    return res.status(404).json({ error: 'Access request not found' });
+  }
+  if (request.studentId !== req.user.id) {
+    return res.status(403).json({ error: 'This request is not yours' });
+  }
+  if (request.status !== 'approved') {
+    return res.status(400).json({ error: `Cannot revoke a request with status: ${request.status}` });
   }
 
-  requests.forEach(r => {
-    db.accessRequests.update(r.id, { status: 'revoked', accessToken: null });
-  });
+  db.accessRequests.update(request.id, { status: 'revoked', accessToken: null });
 
   db.audit.log({
     userId: req.user.id,
     action: 'access_revoked',
-    detail: `Student revoked access for service: ${req.params.serviceId}`
+    detail: `Student revoked access for ${request.serviceName} (request: ${request.id})`
   });
 
-  res.json({ message: `Access revoked for ${req.params.serviceId}`, revokedCount: requests.length });
+  res.json({ message: `Access revoked for ${request.serviceName}`, requestId: request.id });
 });
 
 module.exports = router;

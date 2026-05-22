@@ -6,6 +6,9 @@ const fs = require('fs');
 const db = require('../db');
 const { authMiddleware, requireRole } = require('../auth');
 const moodle = require('../moodle');
+const jwtVc = require('../jwtVc');
+const statusList = require('../statusList');
+const keys = require('../keys');
 
 const router = express.Router();
 
@@ -37,6 +40,38 @@ const upload = multer({
     cb(new Error('Only PDF, JPG, JPEG, PNG, and JSON files are allowed'));
   },
 });
+
+// Magic-byte sniff to defeat client-spoofed Content-Type headers.
+// Returns true if file content matches the claimed mime; deletes the file otherwise.
+function verifyMagicBytes(filePath, claimedMime) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(8);
+    fs.readSync(fd, buf, 0, 8, 0);
+    fs.closeSync(fd);
+    if (claimedMime === 'application/pdf') {
+      return buf.slice(0, 4).toString('ascii') === '%PDF';
+    }
+    if (claimedMime === 'image/png') {
+      return buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
+    }
+    if (claimedMime === 'image/jpeg') {
+      return buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF;
+    }
+    if (claimedMime === 'application/json') {
+      const text = fs.readFileSync(filePath, 'utf8').trim();
+      try { JSON.parse(text); return true; } catch { return false; }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function rejectAndDelete(req, res, message) {
+  if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch {} }
+  return res.status(400).json({ error: message });
+}
 
 router.use(authMiddleware);
 
@@ -102,8 +137,12 @@ router.post('/upload', requireRole('student'), (req, res) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'Certificate file is required (PDF, JPG, PNG, or JSON)' });
 
+    if (!verifyMagicBytes(req.file.path, req.file.mimetype)) {
+      return rejectAndDelete(req, res, 'File content does not match its declared type');
+    }
+
     const certificateName = req.body.certificateName;
-    if (!certificateName) return res.status(400).json({ error: 'certificateName is required' });
+    if (!certificateName) return rejectAndDelete(req, res, 'certificateName is required');
 
     const announcementId = req.body.announcementId || null;
 
@@ -189,6 +228,9 @@ router.put('/uploads/:id', requireRole('student'), (req, res) => {
 
     // Replace file if a new one is provided
     if (req.file) {
+      if (!verifyMagicBytes(req.file.path, req.file.mimetype)) {
+        return rejectAndDelete(req, res, 'File content does not match its declared type');
+      }
       // Delete old file from disk
       if (uploadRec.fileInfo?.storedName) {
         const oldPath = path.join(UPLOAD_DIR, path.basename(uploadRec.fileInfo.storedName));
@@ -263,7 +305,12 @@ router.get('/uploads/:id/file', (req, res) => {
   const filePath = path.join(UPLOAD_DIR, safeName);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File missing from disk' });
   res.setHeader('Content-Type', uploadRec.fileInfo.mimeType);
-  res.setHeader('Content-Disposition', `inline; filename="${uploadRec.fileInfo.originalName}"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Sanitize filename for header injection: strip CR/LF and quotes
+  const safeFilename = String(uploadRec.fileInfo.originalName || 'file').replace(/[\r\n"\\]/g, '_');
+  // PDF/PNG/JPG safe to inline; JSON forced as attachment to prevent any rendering surprise
+  const disposition = uploadRec.fileInfo.mimeType === 'application/json' ? 'attachment' : 'inline';
+  res.setHeader('Content-Disposition', `${disposition}; filename="${safeFilename}"`);
   fs.createReadStream(filePath).pipe(res);
 });
 
@@ -305,97 +352,77 @@ router.get('/pending-uploads', requireRole('admin'), (req, res) => {
   res.json({ uploads });
 });
 
-// POST /credentials/approve-claim/:id — admin approves claim → issues OB 3.0 credential
-router.post('/approve-claim/:id', requireRole('admin'), (req, res) => {
-  const claim = db.claims.findById(req.params.id);
-  if (!claim) return res.status(404).json({ error: 'Claim not found' });
-  if (claim.status !== 'pending') return res.status(400).json({ error: `Already ${claim.status}` });
+// POST /credentials/approve-claim/:id — admin approves claim → issues signed OB 3.0 JWT-VC
+router.post('/approve-claim/:id', requireRole('admin'), async (req, res) => {
+  try {
+    const claim = db.claims.findById(req.params.id);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+    if (claim.status !== 'pending') return res.status(400).json({ error: `Already ${claim.status}` });
 
-  const issuedDate = new Date().toISOString();
-  const credId = uuidv4();
-  const student = db.users.findById(claim.studentId);
-  const announcement = db.announcements.findById(claim.announcementId);
+    const issuedDate = new Date().toISOString();
+    const credId = uuidv4();
+    const student = db.users.findById(claim.studentId);
+    const announcement = db.announcements.findById(claim.announcementId);
+    const studentEmail = student?.email || claim.studentEmail;
 
-  // Build OB 3.0 credential following the official 1EdTech specification
-  // Reference: https://www.imsglobal.org/spec/ob/v3p0/ (skillAssertionCase example)
-  const ob3 = {
-    "@context": [
-      "https://www.w3.org/ns/credentials/v2",
-      "https://purl.imsglobal.org/spec/ob/v3p0/context-3.0.3.json"
-    ],
-    id: `urn:uuid:${credId}`,
-    type: ["VerifiableCredential", "OpenBadgeCredential"],
-    name: claim.achievementName,
-    description: claim.achievementDescription || `Credential for completing ${claim.achievementName}`,
-    issuer: {
-      id: "did:web:academic-wallet.local",
-      type: ["Profile"],
-      name: claim.sourceName || claim.source,
-      description: `${claim.sourceName || claim.source} - credential issuer`,
-      url: "https://university.edu",
-      email: "registrar@university.edu"
-    },
-    validFrom: issuedDate,
-    validUntil: announcement?.expiresAt || new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString(),
-    credentialSubject: {
-      id: student?.did || `urn:uuid:${uuidv4()}`,
-      type: ["AchievementSubject"],
-      identifier: [{
-        type: "IdentityObject",
-        identityHash: student?.email || claim.studentEmail,
-        identityType: "emailAddress",
-        hashed: false,
-        salt: "not-used"
-      }],
-      achievement: {
-        id: `urn:uuid:${uuidv4()}`,
-        type: ["Achievement"],
-        achievementType: announcement?.achievementType || "Certificate",
-        name: claim.achievementName,
-        description: claim.achievementDescription || `Achievement: ${claim.achievementName}`,
-        criteria: {
-          narrative: announcement?.criteria || `Completed ${claim.achievementName} via ${claim.sourceName || claim.source}`
-        },
-        creator: {
-          id: "did:web:academic-wallet.local",
-          type: ["Profile"],
-          name: claim.sourceName || claim.source,
-          url: "https://university.edu"
-        },
-        image: {
-          id: "https://university.edu/badges/default-badge.png",
-          type: "Image",
-          caption: claim.achievementName
-        }
-      },
-      awardedDate: issuedDate
-    },
-    credentialSchema: [{
-      id: "https://purl.imsglobal.org/spec/ob/v3p0/schema/json/ob_v3p0_achievementcredential_schema.json",
-      type: "1EdTechJsonSchemaValidator2019"
-    }]
-  };
+    const listId = statusList.DEFAULT_LIST_ID;
+    const listIndex = statusList.nextIndex(listId);
+    const identitySalt = jwtVc.generateSalt();
 
-  db.claims.updateStatus(claim.id, 'approved', { approvedBy: req.user.id });
+    const vc = jwtVc.buildAchievementCredential({
+      credentialId: credId,
+      achievementId: announcement?.id || credId,
+      achievementName: claim.achievementName,
+      achievementDescription: claim.achievementDescription,
+      achievementType: announcement?.achievementType || 'Achievement',
+      criteriaNarrative: announcement?.criteria || `Completed ${claim.achievementName} via ${claim.sourceName || claim.source}`,
+      imageUrl: 'https://university.edu/badges/default-badge.png',
+      imageCaption: claim.achievementName,
+      studentEmail,
+      studentName: student?.name,
+      issuerName: claim.sourceName || claim.source || 'Academic Achievement Wallet',
+      issuerDescription: `${claim.sourceName || claim.source || 'Academic Achievement Wallet'} - OB 3.0 issuer`,
+      issuerUrl: keys.getState().issuerBaseUrl,
+      issuerEmail: 'registrar@university.edu',
+      validFromIso: issuedDate,
+      validUntilIso: announcement?.expiresAt || new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString(),
+      statusListId: listId,
+      statusListIndex: listIndex,
+      statusListType: 'BitstringStatusListEntry',
+      identitySalt
+    });
 
-  db.credentials.create({
-    id: credId,
-    claimId: claim.id,
-    source: 'claim',
-    type: 'OpenBadgeCredential',
-    issuerId: ob3.issuer.id,
-    issuerName: ob3.issuer.name,
-    holderId: claim.studentId,
-    achievementName: claim.achievementName,
-    achievementDescription: claim.achievementDescription,
-    ob3Json: JSON.stringify(ob3),
-    status: 'issued',
-    shareApproved: true,
-    issuedDate
-  });
+    const { jwt, header, payload } = await jwtVc.signCredential(vc, { studentEmail });
 
-  db.audit.log({ userId: req.user.id, action: 'claim_approved', detail: `Admin approved claim "${claim.achievementName}" for ${claim.studentEmail}` });
-  res.json({ message: 'Claim approved – credential issued', credentialId: credId, ob3 });
+    db.claims.updateStatus(claim.id, 'approved', { approvedBy: req.user.id });
+
+    db.credentials.create({
+      id: credId,
+      claimId: claim.id,
+      source: 'claim',
+      type: 'OpenBadgeCredential',
+      issuerId: vc.issuer.id,
+      issuerName: vc.issuer.name,
+      holderId: claim.studentId,
+      achievementName: claim.achievementName,
+      achievementDescription: claim.achievementDescription,
+      vc,
+      jwt,
+      ob3Json: JSON.stringify(vc),
+      statusListId: listId,
+      statusListIndex: listIndex,
+      identitySalt,
+      status: 'issued',
+      shareApproved: true,
+      issuedDate
+    });
+
+    db.audit.log({ userId: req.user.id, action: 'claim_approved', detail: `Admin approved claim "${claim.achievementName}" for ${studentEmail} → JWT-VC issued (${credId})` });
+    res.json({ message: 'Claim approved – JWT-VC credential issued', credentialId: credId, jwt, vc, header, payload });
+  } catch (err) {
+    console.error('approve-claim error:', err);
+    res.status(500).json({ error: 'Failed to issue credential', detail: err.message });
+  }
 });
 
 // POST /credentials/reject-claim/:id
@@ -409,132 +436,109 @@ router.post('/reject-claim/:id', requireRole('admin'), (req, res) => {
   res.json({ message: 'Claim rejected' });
 });
 
-// POST /credentials/verify-upload/:id — admin verifies uploaded certificate → issues OB 3.0 credential
-// Admin reviews the uploaded file and provides achievement details to create the OB 3.0 credential
-router.post('/verify-upload/:id', requireRole('admin'), (req, res) => {
-  const uploadRec = db.uploads.findById(req.params.id);
-  if (!uploadRec) return res.status(404).json({ error: 'Upload not found' });
-  if (uploadRec.status !== 'pending') return res.status(400).json({ error: `Already ${uploadRec.status}` });
+// POST /credentials/verify-upload/:id — admin verifies uploaded certificate → issues signed JWT-VC
+router.post('/verify-upload/:id', requireRole('admin'), async (req, res) => {
+  try {
+    const uploadRec = db.uploads.findById(req.params.id);
+    if (!uploadRec) return res.status(404).json({ error: 'Upload not found' });
+    if (uploadRec.status !== 'pending') return res.status(400).json({ error: `Already ${uploadRec.status}` });
 
-  // Admin provides these after reviewing the uploaded file
-  const {
-    achievementName,
-    achievementDescription,
-    achievementType,
-    issuerName,
-    criteria,
-    notes
-  } = req.body;
+    const {
+      achievementName,
+      achievementDescription,
+      achievementType,
+      issuerName,
+      criteria,
+      notes
+    } = req.body;
 
-  const finalName = achievementName || uploadRec.certificateName;
-  const finalDesc = achievementDescription || uploadRec.description || `Certificate: ${finalName}`;
-  const finalIssuer = issuerName || 'Verified Issuer';
-  const finalCriteria = criteria || `Verified from uploaded certificate by admin`;
-  const finalType = achievementType || 'Certificate';
+    const finalName = achievementName || uploadRec.certificateName;
+    const finalDesc = achievementDescription || uploadRec.description || `Certificate: ${finalName}`;
+    const finalIssuer = issuerName || 'Academic Achievement Wallet';
+    const finalCriteria = criteria || 'Verified from uploaded certificate by administrator.';
+    const finalType = achievementType || 'Certificate';
 
-  const credId = uuidv4();
-  const issuedDate = new Date().toISOString();
-  const student = db.users.findById(uploadRec.studentId);
+    const credId = uuidv4();
+    const issuedDate = new Date().toISOString();
+    const student = db.users.findById(uploadRec.studentId);
+    const studentEmail = student?.email || uploadRec.studentEmail;
 
-  // Build evidence from the uploaded file
-  const evidenceItems = [];
-  if (uploadRec.fileInfo) {
-    evidenceItems.push({
-      id: `urn:uuid:${uuidv4()}`,
-      type: ["Evidence"],
-      name: uploadRec.fileInfo.originalName || uploadRec.certificateName,
-      description: `Uploaded certificate file verified by admin. ${uploadRec.description || ''}`.trim(),
-      genre: "UploadedDocument",
-      audience: "Administration"
+    const baseUrl = keys.getState().issuerBaseUrl;
+    const evidence = [];
+    if (uploadRec.fileInfo) {
+      evidence.push({
+        id: `${baseUrl}/api/credentials/uploads/${uploadRec.id}/file`,
+        type: ['Evidence'],
+        name: uploadRec.fileInfo.originalName || uploadRec.certificateName,
+        description: `Uploaded certificate file verified by admin. ${uploadRec.description || ''}`.trim(),
+        genre: 'UploadedDocument',
+        audience: 'Administration'
+      });
+    }
+
+    const listId = statusList.DEFAULT_LIST_ID;
+    const listIndex = statusList.nextIndex(listId);
+    const identitySalt = jwtVc.generateSalt();
+
+    const vc = jwtVc.buildAchievementCredential({
+      credentialId: credId,
+      achievementId: credId,
+      achievementName: finalName,
+      achievementDescription: finalDesc,
+      achievementType: finalType,
+      criteriaNarrative: finalCriteria,
+      imageUrl: 'https://university.edu/badges/default-badge.png',
+      imageCaption: finalName,
+      studentEmail,
+      studentName: student?.name,
+      issuerName: finalIssuer,
+      issuerDescription: `${finalIssuer} - OB 3.0 issuer`,
+      issuerUrl: baseUrl,
+      issuerEmail: 'registrar@university.edu',
+      validFromIso: issuedDate,
+      validUntilIso: new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString(),
+      statusListId: listId,
+      statusListIndex: listIndex,
+      statusListType: 'BitstringStatusListEntry',
+      identitySalt,
+      evidence
     });
+
+    const { jwt, header, payload } = await jwtVc.signCredential(vc, { studentEmail });
+
+    db.uploads.updateStatus(uploadRec.id, 'verified', {
+      verifiedBy: req.user.id,
+      adminNotes: notes || 'Verified by admin',
+      credentialId: credId
+    });
+
+    db.credentials.create({
+      id: credId,
+      uploadId: uploadRec.id,
+      source: 'upload',
+      type: 'OpenBadgeCredential',
+      issuerId: vc.issuer.id,
+      issuerName: vc.issuer.name,
+      holderId: uploadRec.studentId,
+      achievementName: finalName,
+      achievementDescription: finalDesc,
+      vc,
+      jwt,
+      ob3Json: JSON.stringify(vc),
+      statusListId: listId,
+      statusListIndex: listIndex,
+      identitySalt,
+      status: 'issued',
+      shareApproved: true,
+      issuedDate
+    });
+
+    db.audit.log({ userId: req.user.id, action: 'upload_verified', detail: `Admin verified upload "${uploadRec.certificateName}" for ${studentEmail} → JWT-VC issued (${credId})` });
+    res.json({ message: 'Upload verified – JWT-VC credential issued', credentialId: credId, jwt, vc, header, payload });
+  } catch (err) {
+    console.error('verify-upload error:', err);
+    res.status(500).json({ error: 'Failed to issue credential', detail: err.message });
   }
-
-  // Build OB 3.0 credential from admin-verified information
-  // Reference: https://www.imsglobal.org/spec/ob/v3p0/ (skillAssertionCase example)
-  const ob3 = {
-    "@context": [
-      "https://www.w3.org/ns/credentials/v2",
-      "https://purl.imsglobal.org/spec/ob/v3p0/context-3.0.3.json"
-    ],
-    id: `urn:uuid:${credId}`,
-    type: ["VerifiableCredential", "OpenBadgeCredential"],
-    name: finalName,
-    description: finalDesc,
-    issuer: {
-      id: "did:web:academic-wallet.local",
-      type: ["Profile"],
-      name: finalIssuer,
-      description: `${finalIssuer} - credential issuer`,
-      url: "https://university.edu",
-      email: "registrar@university.edu"
-    },
-    validFrom: issuedDate,
-    validUntil: new Date(Date.now() + 5 * 365 * 24 * 60 * 60 * 1000).toISOString(),
-    credentialSubject: {
-      id: student?.did || `urn:uuid:${uuidv4()}`,
-      type: ["AchievementSubject"],
-      identifier: [{
-        type: "IdentityObject",
-        identityHash: student?.email || uploadRec.studentEmail,
-        identityType: "emailAddress",
-        hashed: false,
-        salt: "not-used"
-      }],
-      achievement: {
-        id: `urn:uuid:${uuidv4()}`,
-        type: ["Achievement"],
-        achievementType: finalType,
-        name: finalName,
-        description: finalDesc,
-        criteria: { narrative: finalCriteria },
-        creator: {
-          id: "did:web:academic-wallet.local",
-          type: ["Profile"],
-          name: finalIssuer,
-          url: "https://university.edu"
-        },
-        image: {
-          id: "https://university.edu/badges/default-badge.png",
-          type: "Image",
-          caption: finalName
-        }
-      },
-      awardedDate: issuedDate
-    },
-    evidence: evidenceItems.length > 0 ? evidenceItems : undefined,
-    credentialSchema: [{
-      id: "https://purl.imsglobal.org/spec/ob/v3p0/schema/json/ob_v3p0_achievementcredential_schema.json",
-      type: "1EdTechJsonSchemaValidator2019"
-    }]
-  };
-
-  // Remove undefined fields for clean JSON
-  if (!ob3.evidence) delete ob3.evidence;
-
-  db.uploads.updateStatus(uploadRec.id, 'verified', {
-    verifiedBy: req.user.id,
-    adminNotes: notes || 'Verified by admin',
-    credentialId: credId
-  });
-
-  db.credentials.create({
-    id: credId,
-    uploadId: uploadRec.id,
-    source: 'upload',
-    type: 'OpenBadgeCredential',
-    issuerId: ob3.issuer.id,
-    issuerName: ob3.issuer.name,
-    holderId: uploadRec.studentId,
-    achievementName: finalName,
-    achievementDescription: finalDesc,
-    ob3Json: JSON.stringify(ob3),
-    status: 'issued',
-    shareApproved: true,
-    issuedDate
-  });
-
-  db.audit.log({ userId: req.user.id, action: 'upload_verified', detail: `Admin verified upload "${uploadRec.certificateName}" for ${uploadRec.studentEmail} → OB 3.0 credential issued` });
-  res.json({ message: 'Upload verified – OB 3.0 credential issued', credentialId: credId, ob3 });
 });
 
 // POST /credentials/reject-upload/:id
@@ -615,23 +619,33 @@ router.post('/import-moodle-badge', requireRole('student'), async (req, res) => 
       return res.status(404).json({ error: 'Badge not found in Moodle' });
     }
 
-    // Convert to OB 3.0 credential
+    // Convert to OB 3.0 credential and sign as JWT-VC
     const credentialId = uuidv4();
-    const ob3Credential = moodle.badgeToOB3(badge, req.user, credentialId);
+    const { vc, jwt, statusListId, statusListIndex, identitySalt } = await moodle.importMoodleBadgeAsJwtVc(badge, req.user, credentialId);
 
     // Store in wallet DB
-    const allCreds = db.credentials.getAll();
-    const maxId = allCreds.reduce((max, c) => Math.max(max, c.id || 0), 0);
     const newCred = db.credentials.create({
-      id: maxId + 1,
+      id: credentialId,
       holderId: req.user.id,
       title: badge.name,
-      type: 'moodle_import',
-      status: 'verified',
+      type: 'OpenBadgeCredential',
+      source: 'moodle_import',
+      status: 'issued',
+      shareApproved: true,
+      issuerId: vc.issuer.id,
+      issuerName: vc.issuer.name,
+      achievementName: badge.name,
+      achievementDescription: badge.description,
       issuedDate: new Date(badge.dateissued * 1000).toISOString(),
       uploadedAt: new Date().toISOString(),
+      vc,
+      jwt,
+      ob3Json: JSON.stringify(vc),
+      statusListId,
+      statusListIndex,
+      identitySalt,
       credential: {
-        ...ob3Credential,
+        ...vc,
         moodleBadgeId: badgeId
       }
     });
@@ -720,6 +734,50 @@ router.get('/:id', (req, res) => {
   const enriched = { ...cred, holderName: holder?.name, holderEmail: holder?.email, holderStudentId: holder?.studentId };
   const shares = db.shares.getByCredential(cred.id);
   res.json({ credential: enriched, ob3: cred.ob3Json ? JSON.parse(cred.ob3Json) : null, shares });
+});
+
+// GET /credentials/:id/jwt — download the signed JWT-VC for this credential
+router.get('/:id/jwt', (req, res) => {
+  const cred = db.credentials.findById(req.params.id);
+  if (!cred) return res.status(404).json({ error: 'Credential not found' });
+  if (cred.holderId !== req.user.id && req.user.role !== 'admin' && req.user.role !== 'viewer') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  if (!cred.jwt) return res.status(404).json({ error: 'JWT not available for this credential' });
+
+  const filename = `credential-${cred.id}.jwt`;
+  res.setHeader('Content-Type', 'application/jwt');
+  if (req.query.download === '1') {
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  }
+  res.send(cred.jwt);
+});
+
+// POST /credentials/:id/revoke — admin revokes a credential (flips status list bit)
+router.post('/:id/revoke', requireRole('admin'), (req, res) => {
+  const cred = db.credentials.findById(req.params.id);
+  if (!cred) return res.status(404).json({ error: 'Credential not found' });
+  if (cred.status === 'revoked') return res.status(400).json({ error: 'Already revoked' });
+  if (cred.statusListId === undefined || cred.statusListIndex === undefined) {
+    return res.status(400).json({ error: 'Credential has no status list entry — cannot revoke' });
+  }
+
+  statusList.setRevoked(cred.statusListId, cred.statusListIndex, true);
+  db.credentials.update(cred.id, { status: 'revoked', revokedAt: new Date().toISOString(), revokedBy: req.user.id, revokeReason: req.body.reason || null });
+  db.audit.log({ userId: req.user.id, action: 'credential_revoked', detail: `Revoked credential ${cred.id} (${cred.achievementName})` });
+  res.json({ message: 'Credential revoked', credentialId: cred.id });
+});
+
+// POST /credentials/:id/unrevoke — admin restores a revoked credential
+router.post('/:id/unrevoke', requireRole('admin'), (req, res) => {
+  const cred = db.credentials.findById(req.params.id);
+  if (!cred) return res.status(404).json({ error: 'Credential not found' });
+  if (cred.status !== 'revoked') return res.status(400).json({ error: 'Credential is not revoked' });
+
+  statusList.setRevoked(cred.statusListId, cred.statusListIndex, false);
+  db.credentials.update(cred.id, { status: 'issued', revokedAt: null, revokedBy: null, revokeReason: null });
+  db.audit.log({ userId: req.user.id, action: 'credential_unrevoked', detail: `Restored credential ${cred.id}` });
+  res.json({ message: 'Credential restored', credentialId: cred.id });
 });
 
 // POST /credentials/:id/share — student creates a share link
