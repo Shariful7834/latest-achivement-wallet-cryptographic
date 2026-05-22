@@ -54,12 +54,12 @@ export default function Notifications() {
     }
   };
 
-  const handleRevoke = async (serviceId, serviceName) => {
-    setProcessing(serviceId);
+  const handleRevoke = async (requestId, serviceName) => {
+    setProcessing(requestId);
     setSuccess('');
     setError('');
     try {
-      await revokeAccess(serviceId);
+      await revokeAccess(requestId);
       setSuccess(`Access revoked for ${serviceName}.`);
       await fetchData();
     } catch (err) {
@@ -200,8 +200,8 @@ export default function Notifications() {
 
                 {req.status === 'approved' && (
                   <button
-                    onClick={() => handleRevoke(req.serviceId, req.serviceName)}
-                    disabled={processing === req.serviceId}
+                    onClick={() => handleRevoke(req.id, req.serviceName)}
+                    disabled={processing === req.id}
                     className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-xs font-medium text-red-600 hover:bg-red-50 border border-red-200 transition-colors"
                   >
                     <ShieldOff className="w-3.5 h-3.5" />
