@@ -80,8 +80,17 @@ function local_academic_wallet_render_navbar_output(\renderer_base $renderer) {
     $announceurl = new moodle_url('/local/academic_wallet/announce.php');
     $icon = $renderer->pix_icon('i/bullhorn', '', 'moodle', ['class' => 'icon mr-1']);
     $label = get_string('announce_certificate', 'local_academic_wallet');
+
+    $requestsurl = new moodle_url('/local/academic_wallet/requests.php');
+    $icon2 = $renderer->pix_icon('i/permissions', '', 'moodle', ['class' => 'icon mr-1']);
+    $label2 = get_string('my_requests', 'local_academic_wallet');
+
     return '<div class="nav-item">' .
            '<a class="btn btn-sm btn-outline-primary mx-1" href="' . $announceurl->out(true) . '">' .
            $icon . $label .
+           '</a></div>' .
+           '<div class="nav-item">' .
+           '<a class="btn btn-sm btn-outline-secondary mx-1" href="' . $requestsurl->out(true) . '">' .
+           $icon2 . $label2 .
            '</a></div>';
 }

@@ -47,10 +47,16 @@ if ($action === 'request' && confirm_sesskey()) {
     }
 
     $result = $api->request_access($reqemail, $credtype, $reqmsg);
-    if ($result && !empty($result['requestId'])) {
+    if ($result && !empty($result['requestId']) && empty($result['error'])) {
         $message = get_string('request_sent', 'local_academic_wallet') .
                    ' Request ID: ' . $result['requestId'];
         $messagetype = 'success';
+    } else if ($result && !empty($result['error']) && ($result['_http_code'] ?? 0) == 409) {
+        // A pending request already exists — not an error, just inform the professor
+        $message = 'An access request for this student is already pending. Request ID: ' .
+                   ($result['requestId'] ?? 'unknown') .
+                   '. Please wait for the student to approve or deny it.';
+        $messagetype = 'info';
     } else {
         $message = get_string('request_failed', 'local_academic_wallet');
         $messagetype = 'error';

@@ -66,6 +66,13 @@ class wallet_api {
             return json_decode($response, true);
         }
 
+        // Return structured error for callers to handle (e.g. 409 duplicate request)
+        $decoded = json_decode($response, true);
+        if ($decoded && is_array($decoded)) {
+            $decoded['_http_code'] = $httpcode;
+            return $decoded;
+        }
+
         debugging("Wallet API POST $endpoint returned HTTP $httpcode: $response", DEBUG_DEVELOPER);
         return null;
     }
