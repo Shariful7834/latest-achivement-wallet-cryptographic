@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getCredential, shareCredential, getCredentialJwt, getCredentialJwtUrl, revokeCredential, unrevokeCredential } from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import { Award, Share2, Copy, ExternalLink, Clock, Shield, CheckCircle, ArrowLeft, FileKey, Download, Ban, RotateCcw } from 'lucide-react';
+import { Award, Share2, Copy, ExternalLink, Clock, Shield, CheckCircle, ArrowLeft, FileKey, Download, Ban, RotateCcw, FileDown } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function CredentialDetail() {
@@ -75,6 +75,63 @@ export default function CredentialDetail() {
     if (jwt) toast.success('JWT copied — paste it on CertLister');
   };
 
+  const downloadPdf = () => {
+    const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const recipientName = cred.holderName || user.name || '';
+    const recipientEmail = cred.holderEmail || user.email || (ob3?.credentialSubject?.id || '').replace('mailto:', '');
+    const desc = ob3?.credentialSubject?.achievement?.description || cred.achievementDescription || '';
+    const issued = new Date(cred.issuedDate || cred.createdAt).toLocaleDateString();
+    const validUntil = ob3?.validUntil ? new Date(ob3.validUntil).toLocaleDateString() : '';
+    const verifyUrl = `${window.location.origin}/verify`;
+    const w = window.open('', '_blank');
+    if (!w) { toast.error('Popup blocked — allow popups to export PDF'); return; }
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(cred.achievementName)} — Credential</title>
+<style>
+  @page { size: A4; margin: 18mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color: #1f2937; margin: 0; }
+  .cert { border: 2px solid #4f46e5; border-radius: 12px; padding: 40px; max-width: 720px; margin: 0 auto; }
+  .top { text-align: center; border-bottom: 1px solid #e5e7eb; padding-bottom: 20px; margin-bottom: 24px; }
+  .kicker { color: #4f46e5; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; font-weight: 700; }
+  h1 { font-size: 26px; margin: 12px 0 4px; }
+  .issuer { color: #6b7280; font-size: 14px; }
+  .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
+  .row .k { color: #6b7280; }
+  .row .v { font-weight: 600; text-align: right; }
+  .desc { font-size: 14px; color: #374151; margin: 16px 0; line-height: 1.6; }
+  .revoked { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; padding: 10px; border-radius: 8px; text-align: center; font-weight: 700; margin-bottom: 16px; }
+  .verify { margin-top: 28px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+  .verify h2 { font-size: 13px; margin: 0 0 8px; color: #111827; }
+  .verify p { font-size: 12px; color: #4b5563; margin: 4px 0; }
+  .jwt { font-family: monospace; font-size: 8px; word-break: break-all; color: #374151; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 8px; margin-top: 8px; }
+  .foot { text-align: center; color: #9ca3af; font-size: 11px; margin-top: 20px; }
+</style></head><body onload="window.print()">
+  <div class="cert">
+    <div class="top">
+      <div class="kicker">Open Badges 3.0 · Verifiable Credential</div>
+      <h1>${esc(cred.achievementName)}</h1>
+      <div class="issuer">Issued by ${esc(cred.issuerName)}</div>
+    </div>
+    ${isRevoked ? '<div class="revoked">⚠ THIS CREDENTIAL HAS BEEN REVOKED</div>' : ''}
+    <div class="row"><span class="k">Awarded to</span><span class="v">${esc(recipientName)}${recipientEmail ? ' · ' + esc(recipientEmail) : ''}</span></div>
+    <div class="row"><span class="k">Issued</span><span class="v">${esc(issued)}</span></div>
+    ${validUntil ? `<div class="row"><span class="k">Valid until</span><span class="v">${esc(validUntil)}</span></div>` : ''}
+    <div class="row"><span class="k">Signature</span><span class="v">ES256 · did:web</span></div>
+    ${desc ? `<p class="desc">${esc(desc)}</p>` : ''}
+    <div class="verify">
+      <h2>How to verify this credential</h2>
+      <p>1. Open an Open Badges 3.0 verifier (e.g. certlister.com/ob3-validator or ${esc(verifyUrl)}).</p>
+      <p>2. Paste the signed credential token (JWT) below.</p>
+      <p>3. The verifier confirms the issuer, signature, and revocation status — proving this document is authentic and unaltered.</p>
+      ${jwt ? `<div class="jwt">${esc(jwt)}</div>` : ''}
+    </div>
+    <div class="foot">Academic Achievement Wallet · This PDF is a human-readable copy; the JWT above is the cryptographic proof.</div>
+  </div>
+</body></html>`);
+    w.document.close();
+    w.focus();
+  };
+
   const handleRevoke = async () => {
     const reason = window.prompt('Reason for revocation (optional):') || '';
     setBusy(true);
@@ -137,6 +194,14 @@ export default function CredentialDetail() {
           </div>
 
           <div className="flex flex-col items-end gap-2">
+            <button
+              type="button"
+              onClick={downloadPdf}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition"
+            >
+              <FileDown className="w-3.5 h-3.5" />
+              Download PDF
+            </button>
             {cred.shareApproved ? (
               <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-green-700 bg-green-50 rounded-lg">
                 <Share2 className="w-3.5 h-3.5" />

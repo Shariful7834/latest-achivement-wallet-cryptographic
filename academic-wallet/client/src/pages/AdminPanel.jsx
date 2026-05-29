@@ -10,6 +10,7 @@ import {
   Trash2, Plus, Eye, FileText, Activity, Image, FileJson, File, Search,
   ExternalLink, Copy
 } from 'lucide-react';
+import PageHeader from '../components/ui/PageHeader';
 import toast from 'react-hot-toast';
 import { appConfig } from '../config/appConfig';
 
@@ -176,10 +177,11 @@ export default function AdminPanel() {
 
   return (
     <div className="max-w-5xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Admin Panel</h1>
-        <p className="text-gray-500 text-sm mt-1">Verify student uploads, manage users, test Moodle API</p>
-      </div>
+      <PageHeader
+        icon={Shield}
+        title="Admin Panel"
+        subtitle="Verify student uploads, manage users, and test the Moodle API."
+      />
 
       {/* Tabs */}
       <div className="flex flex-wrap gap-2 mb-4">

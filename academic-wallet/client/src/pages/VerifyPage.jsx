@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { verifyCredential, verifyJwt, verifyByUrl } from '../services/api';
 import { ShieldCheck, AlertTriangle, CheckCircle, XCircle, Upload, FileJson, FileKey, Link as LinkIcon, ExternalLink, Copy } from 'lucide-react';
+import PageHeader from '../components/ui/PageHeader';
 import toast from 'react-hot-toast';
 
 const TABS = [
@@ -72,15 +73,11 @@ export default function VerifyPage() {
 
   return (
     <div className="max-w-3xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-          <ShieldCheck className="w-7 h-7 text-indigo-600" />
-          Verify OB 3.0 Credential
-        </h1>
-        <p className="text-gray-500 text-sm mt-1">
-          Verify a JWT-VC, JSON-LD credential, or fetch one by URL. Validates structure, expiry, status list, and cryptographic signature (ES256 over did:web).
-        </p>
-      </div>
+      <PageHeader
+        icon={ShieldCheck}
+        title="Verify OB 3.0 Credential"
+        subtitle="Verify a JWT-VC, JSON-LD credential, or fetch one by URL. Validates structure, expiry, status list, and cryptographic signature (ES256 over did:web)."
+      />
 
       {/* Tabs */}
       <div className="flex gap-2 mb-3">
