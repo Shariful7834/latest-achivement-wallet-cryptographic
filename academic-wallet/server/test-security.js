@@ -98,8 +98,9 @@ async function http(p, opts={}) {
   const jwtLib = require('jsonwebtoken');
   const forged = jwtLib.sign({ id: 99999, role: 'admin', email: 'forged@evil.com' }, process.env.JWT_SECRET || 'aw-jwt-secret-2024-change-in-prod');
   const meR = await http('/auth/me', { headers: { 'Authorization': `Bearer ${forged}` } });
-  // /auth/me looks up user in DB → should 404 because forged user doesn't exist
-  t('forged token cannot impersonate real user', meR.status === 404);
+  // Forged token is rejected either by signature mismatch (401, non-default secret set)
+  // or by DB lookup of a non-existent user (404). Both prove impersonation fails.
+  t('forged token cannot impersonate real user', meR.status === 404 || meR.status === 401);
 
   section('Body size limit (S7)');
   const big = 'x'.repeat(5 * 1024 * 1024); // 5 MB > 4 MB limit

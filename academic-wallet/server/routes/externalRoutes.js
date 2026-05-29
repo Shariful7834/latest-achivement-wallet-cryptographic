@@ -4,9 +4,23 @@ const db = require('../db');
 const { apiKeyMiddleware, API_KEYS } = require('../auth');
 const jwtVc = require('../jwtVc');
 const statusList = require('../statusList');
+const keys = require('../keys');
 const { safeFetch } = require('../safeFetch');
 
 const router = express.Router();
+
+// Resolve URLs that belong to our own issuer base over loopback, so the server can
+// always verify credentials it issued — even if the public issuer URL (CDN / tunnel /
+// stable domain) is temporarily unreachable. Third-party URLs are fetched unchanged.
+function localizeOwnIssuerUrl(url) {
+  try {
+    const ownBase = (keys.getState().issuerBaseUrl || '').replace(/\/$/, '');
+    if (ownBase && typeof url === 'string' && url.startsWith(ownBase)) {
+      return url.replace(ownBase, `http://127.0.0.1:${process.env.PORT || 4000}`);
+    }
+  } catch { /* keys not init — fall through */ }
+  return url;
+}
 
 // ── POST /api/announce-certificate ─────────────────────────
 // Moodle announces a course certificate is available → ALL students see it
@@ -88,23 +102,29 @@ router.post('/share-credential', apiKeyMiddleware, (req, res) => {
 });
 
 // ── GET /api/public-credentials/:id ─────────────────────────
-// Returns OB 3.0 JSON-LD credential (API key OR share token)
+// Share-token access → render-ready shape for the public /shared page.
+// API-key access → raw OB 3.0 JSON-LD for machine consumers.
 router.get('/public-credentials/:id', (req, res) => {
   const apiKey = req.headers['x-api-key'];
   const shareToken = req.query.token;
 
   let credential;
+  let viaShare = false;
 
   if (shareToken) {
     const share = db.shares.findByToken(shareToken);
-    if (!share || (share.expiresAt && new Date(share.expiresAt) < new Date())) {
+    if (!share || share.credentialId !== req.params.id) {
       return res.status(404).json({ error: 'Invalid or expired share link' });
+    }
+    if (share.expiresAt && new Date(share.expiresAt) < new Date()) {
+      return res.status(410).json({ error: 'This share link has expired' });
     }
     credential = db.credentials.findById(share.credentialId);
     if (!credential || !credential.shareApproved) {
       return res.status(403).json({ error: 'Credential not approved for sharing' });
     }
     db.shares.incrementView(shareToken);
+    viaShare = true;
   } else if (apiKey && API_KEYS[apiKey]) {
     credential = db.credentials.findById(req.params.id);
   } else {
@@ -114,7 +134,26 @@ router.get('/public-credentials/:id', (req, res) => {
   if (!credential) return res.status(404).json({ error: 'Credential not found' });
   if (credential.status !== 'issued') return res.status(403).json({ error: `Credential status: ${credential.status}` });
 
-  res.json(JSON.parse(credential.ob3Json));
+  const ob3 = credential.ob3Json ? JSON.parse(credential.ob3Json) : null;
+
+  // Machine consumers (API key) get the raw OB 3.0 JSON-LD.
+  if (!viaShare) return res.json(ob3);
+
+  // Human share page gets a render-ready shape (field names match SharedCredential.jsx).
+  const holder = db.users.findById(credential.holderId);
+  res.json({
+    credential: {
+      achievementName: credential.achievementName,
+      achievementDescription: credential.achievementDescription,
+      issuerName: credential.issuerName,
+      issuedAt: credential.issuedDate || credential.createdAt,
+      source: credential.source,
+      holderName: holder?.name || null,
+      holderEmail: holder?.email || null,
+      ob3Credential: ob3
+    },
+    sharedBy: holder?.name || 'Unknown'
+  });
 });
 
 // ── POST /api/verify ───────────────────────────────────────
@@ -130,7 +169,7 @@ router.post('/verify', async (req, res) => {
 
     // 1) URL: fetch it (SSRF-protected)
     if (url || (typeof input === 'string' && /^https?:\/\//i.test(input.trim()))) {
-      const fetchUrl = url || input.trim();
+      const fetchUrl = localizeOwnIssuerUrl(url || input.trim());
       try {
         const r = await safeFetch(fetchUrl, { headers: { Accept: 'application/vc+jwt, application/vc+ld+json, application/jwt, application/json' } });
         if (!r.ok) return res.status(400).json({ error: `Failed to fetch ${fetchUrl} (HTTP ${r.status})` });
@@ -238,8 +277,10 @@ router.post('/verify', async (req, res) => {
       try {
         const listCredUrl = cs.statusListCredential;
         const idx = parseInt(cs.statusListIndex, 10);
-        // Fetch JWT (default content-type) and verify signature; fallback to JSON
-        const r = await safeFetch(listCredUrl, { headers: { Accept: 'application/vc+jwt, application/vc+ld+json' } });
+        // Fetch JWT (default content-type) and verify signature; fallback to JSON.
+        // Own-issuer status lists resolve over loopback so self-verification never
+        // depends on the public issuer URL being reachable.
+        const r = await safeFetch(localizeOwnIssuerUrl(listCredUrl), { headers: { Accept: 'application/vc+jwt, application/vc+ld+json' } });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const ct = (r.headers.get('content-type') || '').toLowerCase();
         const body = await r.text();
@@ -410,39 +451,6 @@ router.get('/students/:id/credentials', apiKeyMiddleware, (req, res) => {
   res.json({
     student: { id: student.id, name: student.name, email: student.email, studentId: student.studentId },
     credentials: creds
-  });
-});
-
-// ── GET /api/public-credentials/:id?token=... ──────────────
-// Public (no auth) – view a shared credential via share token
-router.get('/public-credentials/:id', (req, res) => {
-  const { token } = req.query;
-  if (!token) return res.status(400).json({ error: 'Share token required' });
-
-  const share = db.shares.findByToken(token);
-  if (!share || share.credentialId !== req.params.id) {
-    return res.status(404).json({ error: 'Share link not found or expired' });
-  }
-  if (share.expiresAt && new Date(share.expiresAt) < new Date()) {
-    return res.status(410).json({ error: 'This share link has expired' });
-  }
-
-  const cred = db.credentials.findById(share.credentialId);
-  if (!cred) return res.status(404).json({ error: 'Credential not found' });
-
-  const holder = db.users.findById(cred.holderId);
-  db.shares.incrementView(token);
-
-  res.json({
-    credential: {
-      achievementName: cred.achievementName,
-      achievementDescription: cred.achievementDescription,
-      issuerName: cred.issuerName,
-      issuedDate: cred.issuedDate,
-      source: cred.source,
-      ob3Credential: cred.ob3Json ? JSON.parse(cred.ob3Json) : null
-    },
-    sharedBy: holder?.name || 'Unknown'
   });
 });
 
