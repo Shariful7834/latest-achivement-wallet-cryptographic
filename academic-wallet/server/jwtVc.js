@@ -57,7 +57,9 @@ function buildAchievementCredential({
   statusListIndex,
   statusListType = 'BitstringStatusListEntry',
   identitySalt,
-  evidence
+  evidence,
+  alignment,
+  tag
 }) {
   const s = keys.getState();
   const baseUrl = s.issuerBaseUrl;
@@ -106,7 +108,10 @@ function buildAchievementCredential({
             type: 'Image',
             ...(imageCaption ? { caption: imageCaption } : {})
           }
-        } : {})
+        } : {}),
+        // Framework alignment (the key the LMS matches on for Pre-check) + free-text tags.
+        ...(Array.isArray(alignment) && alignment.length > 0 ? { alignment } : {}),
+        ...(Array.isArray(tag) && tag.length > 0 ? { tag } : {})
       },
       identifier: [{
         type: 'IdentityObject',

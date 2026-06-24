@@ -25,7 +25,10 @@ const router = express.Router();
 // survives an origin restart or slowdown — the #1 cause of "issuer unreachable".
 // Revocation-sensitive resources (credentials, status list) stay fresh.
 const STABLE_CACHE = 'public, max-age=3600, stale-while-revalidate=86400';
-const FRESH_CACHE = 'public, max-age=60';
+// Status list: revocation changes rarely. Cache it long with a long stale window so
+// external verifiers / CDNs keep a working copy and don't hammer the origin on every
+// check — the cause of intermittent "status server unreachable" on flaky hosts.
+const FRESH_CACHE = 'public, max-age=300, stale-while-revalidate=86400';
 
 function setCors(res, cache = 'no-cache') {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -112,8 +115,11 @@ router.get('/achievements/:id', (req, res) => {
 });
 
 // ── GET /api/badges/status/:listId ─────────────────────────
-// Returns the StatusListCredential as a SIGNED JWT-VC by default (VCDM 2.0 + OB 3.0).
-// JSON-LD form available via Accept: application/vc+ld+json.
+// Returns the StatusListCredential. Defaults to JSON-LD (with a readable
+// encodedList) for maximum verifier interoperability — a generic fetcher
+// (Accept: */* or none) must be able to read the revocation bitstring.
+// The SIGNED JWT-VC form is returned only when the client explicitly accepts
+// it (Accept: application/vc+jwt) or asks via ?format=jwt.
 router.get('/status/:listId', async (req, res) => {
   setCors(res, FRESH_CACHE);
   const s = keys.getState();
@@ -121,8 +127,8 @@ router.get('/status/:listId', async (req, res) => {
 
   const accept = (req.headers.accept || '').toLowerCase();
   const acceptsJwt = accept.includes('application/vc+jwt') || accept.includes('application/jwt');
-  const acceptsJsonLd = accept.includes('application/vc+ld+json') || accept.includes('application/ld+json') || accept.includes('application/json');
-  const wantsJsonLd = (acceptsJsonLd && !acceptsJwt) || req.query.format === 'json';
+  const wantsJwt = acceptsJwt || req.query.format === 'jwt';
+  const wantsJsonLd = !wantsJwt;
 
   // Allow legacy StatusList2021 form via ?spec=2021
   const spec = req.query.spec === '2021' ? 'statuslist2021' : 'bitstring';

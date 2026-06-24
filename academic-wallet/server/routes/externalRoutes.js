@@ -140,6 +140,7 @@ router.get('/public-credentials/:id', (req, res) => {
   if (!viaShare) return res.json(ob3);
 
   // Human share page gets a render-ready shape (field names match SharedCredential.jsx).
+  // Include the signed JWT-VC so the viewer can independently verify authenticity.
   const holder = db.users.findById(credential.holderId);
   res.json({
     credential: {
@@ -148,9 +149,11 @@ router.get('/public-credentials/:id', (req, res) => {
       issuerName: credential.issuerName,
       issuedAt: credential.issuedDate || credential.createdAt,
       source: credential.source,
+      status: credential.status,
       holderName: holder?.name || null,
       holderEmail: holder?.email || null,
-      ob3Credential: ob3
+      ob3Credential: ob3,
+      jwt: credential.jwt || null
     },
     sharedBy: holder?.name || 'Unknown'
   });

@@ -449,14 +449,44 @@ router.post('/verify-upload/:id', requireRole('admin'), async (req, res) => {
       achievementType,
       issuerName,
       criteria,
+      imageUrl,
+      tags,
+      frameworkName,
+      frameworkCode,
       notes
     } = req.body;
+
+    // Tags: comma-separated string -> array. Alignment: a single framework code/name the
+    // LMS matches on for Pre-check (optional, issuer-set).
+    const tagArr = typeof tags === 'string'
+      ? tags.split(',').map(t => t.trim()).filter(Boolean)
+      : (Array.isArray(tags) ? tags : []);
+    const alignmentArr = (frameworkCode && String(frameworkCode).trim())
+      ? [{
+          targetName: String(frameworkName || frameworkCode).trim(),
+          targetFramework: String(frameworkName || '').trim() || undefined,
+          targetCode: String(frameworkCode).trim(),
+          targetType: 'CFItem',
+          targetUrl: `${keys.getState().issuerBaseUrl}/framework/${encodeURIComponent(String(frameworkCode).trim())}`
+        }]
+      : [];
 
     const finalName = achievementName || uploadRec.certificateName;
     const finalDesc = achievementDescription || uploadRec.description || `Certificate: ${finalName}`;
     const finalIssuer = issuerName || 'Academic Achievement Wallet';
     const finalCriteria = criteria || 'Verified from uploaded certificate by administrator.';
     const finalType = achievementType || 'Certificate';
+    // Issuer-controlled badge image (institution / block-week logo). Accepts an https URL
+    // OR an uploaded image embedded as a data URI (png/jpeg/svg), capped in size so the
+    // credential stays reasonable. Falls back to the default. The recipient never sets it.
+    const DEFAULT_BADGE_IMAGE = 'https://university.edu/badges/default-badge.png';
+    const MAX_IMAGE_CHARS = 700 * 1024; // ~512 KB image after base64
+    const candidate = typeof imageUrl === 'string' ? imageUrl.trim() : '';
+    const isHttps = /^https:\/\//i.test(candidate);
+    const isImageDataUri = /^data:image\/(png|jpe?g|svg\+xml);base64,/i.test(candidate);
+    const finalImage = ((isHttps || isImageDataUri) && candidate.length <= MAX_IMAGE_CHARS)
+      ? candidate
+      : DEFAULT_BADGE_IMAGE;
 
     const credId = uuidv4();
     const issuedDate = new Date().toISOString();
@@ -487,7 +517,7 @@ router.post('/verify-upload/:id', requireRole('admin'), async (req, res) => {
       achievementDescription: finalDesc,
       achievementType: finalType,
       criteriaNarrative: finalCriteria,
-      imageUrl: 'https://university.edu/badges/default-badge.png',
+      imageUrl: finalImage,
       imageCaption: finalName,
       studentEmail,
       studentName: student?.name,
@@ -501,7 +531,9 @@ router.post('/verify-upload/:id', requireRole('admin'), async (req, res) => {
       statusListIndex: listIndex,
       statusListType: 'BitstringStatusListEntry',
       identitySalt,
-      evidence
+      evidence,
+      alignment: alignmentArr,
+      tag: tagArr
     });
 
     const { jwt, header, payload } = await jwtVc.signCredential(vc, { studentEmail });
@@ -603,10 +635,10 @@ router.post('/import-moodle-badge', requireRole('student'), async (req, res) => 
       return res.status(400).json({ error: 'badgeId and moodleUserId are required' });
     }
 
-    // Check if already imported
+    // Check if already imported (normalize id type — Moodle ids may arrive as number or string)
     const existingCreds = db.credentials.getByHolder(req.user.id);
     const alreadyImported = existingCreds.find(
-      c => c.credential?.moodleBadgeId === badgeId
+      c => String(c.credential?.moodleBadgeId) === String(badgeId)
     );
     if (alreadyImported) {
       return res.status(409).json({ error: 'This badge has already been imported' });
@@ -614,7 +646,7 @@ router.post('/import-moodle-badge', requireRole('student'), async (req, res) => 
 
     // Fetch the badge details from Moodle
     const badges = await moodle.getUserBadges(moodleUserId);
-    const badge = badges.find(b => b.id === badgeId);
+    const badge = badges.find(b => String(b.id) === String(badgeId));
     if (!badge) {
       return res.status(404).json({ error: 'Badge not found in Moodle' });
     }

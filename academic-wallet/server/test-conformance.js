@@ -222,8 +222,13 @@ function decodeJwtParts(jwt) {
 
   section('9. Status list (C1 + C4)');
   const slUrl = vc.credentialStatus.statusListCredential.replace(/^https?:\/\/[^/]+/, '');
-  const slJwt = await http(slUrl);
-  t('default status list returns vc+jwt', slJwt.ct.includes('application/vc+jwt'));
+  // Default (generic fetch) returns JSON-LD with a readable encodedList for verifier interop.
+  const slDefault = await http(slUrl);
+  t('default status list returns JSON-LD (interop)', slDefault.ct.includes('application/vc+ld+json'));
+  t('default status list has encodedList', !!slDefault.body?.credentialSubject?.encodedList);
+  // Signed JWT-VC form is available on explicit request.
+  const slJwt = await http(slUrl, { headers: { Accept: 'application/vc+jwt' } });
+  t('explicit Accept vc+jwt returns vc+jwt', slJwt.ct.includes('application/vc+jwt'));
   t('status list JWT 3-segment', typeof slJwt.body === 'string' && slJwt.body.split('.').length === 3);
 
   const slDecoded = decodeJwtParts(slJwt.body);
