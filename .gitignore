@@ -25,6 +25,15 @@ certlister.txt
 screenshot/
 *.py
 
+# ── Private meeting transcripts (never commit) ───
+*conversation*.txt
+*converstation*.txt
+*.txt
+
+# ── DB backups (local only) ──────────────────────
+academic-wallet/data/db.json.bak-*
+academic-wallet/data/*.bak*
+
 # ── Moodle core (only plugin is tracked) ─────────
 moodle/*
 !moodle/local/
