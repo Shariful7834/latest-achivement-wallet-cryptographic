@@ -18,7 +18,13 @@ export default function Announcements() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { fetchData(); }, []);
+  useEffect(() => {
+    fetchData();
+    // Refetch when returning to this page/tab so submit status is never stale.
+    const onFocus = () => fetchData();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   const handleSubmitCertificate = (ann) => {
     // Navigate to upload page pre-filled with announcement details

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { verifyCredential, verifyJwt, verifyByUrl } from '../services/api';
 import { ShieldCheck, AlertTriangle, CheckCircle, XCircle, Upload, FileJson, FileKey, Link as LinkIcon, ExternalLink, Copy } from 'lucide-react';
 import PageHeader from '../components/ui/PageHeader';
@@ -38,22 +38,15 @@ export default function VerifyPage() {
     }
   };
 
-  const runVerify = async () => {
+  // Run verification for an explicit mode+value (used by the button and by QR deep-links).
+  const runVerifyValue = async (mode, value) => {
     setLoading(true);
     setResult(null);
     try {
       let res;
-      if (tab === 'jwt') {
-        if (!jwtInput.trim()) { toast.error('Paste a JWT'); setLoading(false); return; }
-        res = await verifyJwt(jwtInput.trim());
-      } else if (tab === 'json') {
-        if (!jsonInput.trim()) { toast.error('Paste a JSON credential'); setLoading(false); return; }
-        try { JSON.parse(jsonInput); } catch { toast.error('Invalid JSON'); setLoading(false); return; }
-        res = await verifyCredential(jsonInput);
-      } else {
-        if (!urlInput.trim()) { toast.error('Enter a URL'); setLoading(false); return; }
-        res = await verifyByUrl(urlInput.trim());
-      }
+      if (mode === 'jwt') res = await verifyJwt(value.trim());
+      else if (mode === 'json') res = await verifyCredential(value);
+      else res = await verifyByUrl(value.trim());
       setResult(res.data);
     } catch (err) {
       setResult(err.response?.data || { verified: false, errors: [err.message || 'Verification failed'] });
@@ -61,6 +54,30 @@ export default function VerifyPage() {
       setLoading(false);
     }
   };
+
+  const runVerify = async () => {
+    if (tab === 'jwt') {
+      if (!jwtInput.trim()) { toast.error('Paste a JWT'); return; }
+      return runVerifyValue('jwt', jwtInput);
+    }
+    if (tab === 'json') {
+      if (!jsonInput.trim()) { toast.error('Paste a JSON credential'); return; }
+      try { JSON.parse(jsonInput); } catch { toast.error('Invalid JSON'); return; }
+      return runVerifyValue('json', jsonInput);
+    }
+    if (!urlInput.trim()) { toast.error('Enter a URL'); return; }
+    return runVerifyValue('url', urlInput);
+  };
+
+  // Auto-verify from a deep link (e.g. a scanned QR code): /verify?url=... or /verify?jwt=...
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('url');
+    const jwt = params.get('jwt');
+    if (url) { setTab('url'); setUrlInput(url); runVerifyValue('url', url); }
+    else if (jwt) { setTab('jwt'); setJwtInput(jwt); runVerifyValue('jwt', jwt); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const copyResult = () => {
     navigator.clipboard.writeText(JSON.stringify(result, null, 2));
